@@ -17,7 +17,7 @@ use std::num::NonZeroU32;
 use std::string::FromUtf8Error;
 
 /// Semantic properties of a SPIR-V module (not tied to any IDs).
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Dialect {
     pub version_major: u8,
     pub version_minor: u8,

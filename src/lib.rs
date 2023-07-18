@@ -245,7 +245,7 @@ mod sealed {
 pub use sealed::Module;
 
 /// Semantic properties of a SPIR-T module (not tied to any declarations/definitions).
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ModuleDialect {
     Spv(spv::Dialect),
 }

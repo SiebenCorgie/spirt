@@ -110,30 +110,16 @@ impl Module {
         cx: Rc<Context>,
         parser: spv::read::ModuleParser,
     ) -> io::Result<Self> {
-        let spv_spec = spec::Spec::get();
-        let wk = &spv_spec.well_known;
+        //build the empty module from the currently parsed spv parser
+        let module = {
+            let [magic, version, generator_magic, id_bound, reserved_inst_schema] = parser.header;
 
-        // HACK(eddyb) used to quickly check whether an `OpVariable` is global.
-        let storage_class_function_imm = spv::Imm::Short(wk.StorageClass, wk.Function);
-
-        let mut module = {
-            let [
-                magic,
-                version,
-                generator_magic,
-                id_bound,
-                reserved_inst_schema,
-            ] = parser.header;
-
+            let spv_spec = spec::Spec::get();
             // Ensured above (this is the value after any endianness swapping).
             assert_eq!(magic, spv_spec.magic);
 
-            let [
-                version_reserved_hi,
-                version_major,
-                version_minor,
-                version_reserved_lo,
-            ] = version.to_be_bytes();
+            let [version_reserved_hi, version_major, version_minor, version_reserved_lo] =
+                version.to_be_bytes();
 
             if (version_reserved_lo, version_reserved_hi) != (0, 0) {
                 return Err(invalid(&format!(
@@ -170,6 +156,65 @@ impl Module {
                     module_processes: vec![],
                 }),
             )
+        };
+
+        Self::lower_from_spv_module_parser_into_module(cx, parser, module)
+    }
+    pub fn lower_from_spv_module_parser_into_module(
+        cx: Rc<Context>,
+        parser: spv::read::ModuleParser,
+        mut module: Self,
+    ) -> io::Result<Self> {
+        let spv_spec = spec::Spec::get();
+        let wk = &spv_spec.well_known;
+
+        // HACK(eddyb) used to quickly check whether an `OpVariable` is global.
+        let storage_class_function_imm = spv::Imm::Short(wk.StorageClass, wk.Function);
+
+        {
+            let [magic, version, _generator_magic, id_bound, reserved_inst_schema] = parser.header;
+
+            // Ensured above (this is the value after any endianness swapping).
+            assert_eq!(magic, spv_spec.magic);
+
+            let [version_reserved_hi, version_major, version_minor, version_reserved_lo] =
+                version.to_be_bytes();
+
+            if (version_reserved_lo, version_reserved_hi) != (0, 0) {
+                return Err(invalid(&format!(
+                    "version 0x{version:08x} is not in expected (0.major.minor.0) form"
+                )));
+            }
+
+            // FIXME(eddyb) maybe use this somehow? (e.g. check IDs against it)
+            let _ = id_bound;
+
+            if reserved_inst_schema != 0 {
+                return Err(invalid(&format!(
+                    "unknown instruction schema {reserved_inst_schema} - only 0 is supported"
+                )));
+            }
+
+            //Make sure that the module we are parsing into, and the module we
+            // are loading are compatible.
+            // NOTE(siebencorgie): Right now *compatible* means *the same*.
+            //                     We are not checking the generator magic.
+
+            let dialect = crate::ModuleDialect::Spv(spv::Dialect {
+                version_major,
+                version_minor,
+
+                capabilities: BTreeSet::new(),
+                extensions: BTreeSet::new(),
+
+                addressing_model: 0,
+                memory_model: 0,
+            });
+            if dialect != module.dialect {
+                return Err(invalid(&format!(
+                    "Dialect missmatch of module and lowered SPIR-V version"
+                )));
+            }
         };
 
         #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -382,11 +427,7 @@ impl Module {
             } else if opcode == wk.OpSource {
                 assert!(inst.result_type_id.is_none() && inst.result_id.is_none());
                 let (lang, version) = match inst.imms[..] {
-                    [
-                        spv::Imm::Short(l_kind, lang),
-                        spv::Imm::Short(v_kind, version),
-                        ..,
-                    ] => {
+                    [spv::Imm::Short(l_kind, lang), spv::Imm::Short(v_kind, version), ..] => {
                         assert_eq!([l_kind, v_kind], [wk.SourceLanguage, wk.LiteralInteger]);
                         (lang, version)
                     }
@@ -513,14 +554,12 @@ impl Module {
 
                 match inst.imms[..] {
                     // Special-case `OpDecorate LinkageAttributes ... Import|Export`.
-                    [
-                        decoration @ spv::Imm::Short(..),
-                        ref name @ ..,
-                        spv::Imm::Short(lt_kind, linkage_type),
-                    ] if opcode == wk.OpDecorate
-                        && decoration == spv::Imm::Short(wk.Decoration, wk.LinkageAttributes)
-                        && lt_kind == wk.LinkageType
-                        && [wk.Import, wk.Export].contains(&linkage_type) =>
+                    [decoration @ spv::Imm::Short(..), ref name @ .., spv::Imm::Short(lt_kind, linkage_type)]
+                        if opcode == wk.OpDecorate
+                            && decoration
+                                == spv::Imm::Short(wk.Decoration, wk.LinkageAttributes)
+                            && lt_kind == wk.LinkageType
+                            && [wk.Import, wk.Export].contains(&linkage_type) =>
                     {
                         let name = spv::extract_literal_string(name)
                             .map_err(|e| invalid(&format!("{} in {:?}", e, e.as_bytes())))?;
